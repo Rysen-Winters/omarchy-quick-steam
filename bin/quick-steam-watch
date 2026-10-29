@@ -1,0 +1,565 @@
+#!/usr/bin/env python3
+"""Watch what Steam is doing and print one line of JSON whenever it changes:
+
+  {"running":{...}|null,"downloads":[...],"shaders":{...}|null,"queued":N}
+
+The bar starts this once and reads its output line by line. Every 2 seconds it
+only looks at the modification times of the files Steam writes. When none of
+them changed there is nothing to read and nothing to print, so a quiet Steam
+costs a few dozen stat() calls. Sources, all read-only:
+
+  <library>/steamapps/appmanifest_*.acf   state flags and bytes downloaded and
+                                          staged; re-read only when touched.
+                                          Steam only rewrites these when a
+                                          download starts, pauses or ends, so
+  <library>/steamapps/downloading/<id>/   the files being staged give the live
+                                          progress, measured every 5 s while
+                                          something downloads
+  <library>/steamapps/workshop/           the same for Workshop items:
+                                          downloads/<id>/ is staged like a
+                                          game, appworkshop_<id>.acf says how
+                                          many items are pending and whether
+                                          any still are
+  logs/content_log.txt                    what the scheduler did with each
+                                          download, Workshop jobs (the app
+                                          stays fully installed, so only the
+                                          log tells), their sizes and the
+                                          download rate
+  logs/shader_log.txt                     the game whose shaders are being
+                                          processed and Steam's percentage
+  config/config.vdf                       ProcessingQueue: the game being
+                                          processed stays in it until done
+  /proc                                   the game being played (Steam starts
+                                          it as "reaper SteamLaunch AppId=<id>")
+                                          and fossilize_replay, which compiles
+                                          the shaders
+
+Logs are followed like tail -f: only the bytes appended since the last look
+are parsed. /proc is walked when a Steam file changed, and every 15 seconds
+in case a game starts or stops without Steam logging it.
+
+Times go out as Unix timestamps of when something started, so the bar works
+out "for 5 min" with its own clock and no line has to be printed just because
+time passed.
+"""
+
+import ctypes
+import json
+import os
+import re
+import signal
+import sys
+import time
+
+# -I keeps the script's own folder off sys.path; the shared helpers live there.
+# No bytecode cache: the plugin folder is a git checkout.
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from quick_steam_common import as_int, child, libraries, load_text_vdf, steam_root  # noqa: E402
+
+TICK = 2.0
+PROC_EVERY = 15.0
+RATE_FRESH = 90          # Steam logs the download rate about once a minute.
+PROGRESS_EVERY = 5.0     # Staging folder walk while a download runs (~8 ms).
+SHADER_QUIET = 300       # A queue with a quiet shader log is just waiting.
+CHUNK = 1024 * 1024
+
+STAMP = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] ")
+STATE_CHANGED = re.compile(r"AppID (\d+) state changed : (.*)")
+RATE = re.compile(r"Current download rate: ([0-9.]+) Mbps")
+PREALLOCATED = re.compile(r"AppID (\d+) preallocated \d+ files \((\d+) MB\)")
+WORKSHOP_CHANGED = re.compile(r"AppID (\d+) Workshop update changed : (.*)")
+UPDATE_STARTED = re.compile(r"AppID (\d+) update started : download (\d+)/(\d+), .*stage (\d+)/(\d+)")
+SCHEDULE_REMOVED = re.compile(r"AppID (\d+) scheduler finished : removed from schedule")
+JOB_STARTED = re.compile(r"Starting processing job for app (\d+)!")
+REPLAYING = re.compile(r"Still replaying (\d+) \((\d+)%")
+JOB_DONE = re.compile(r"App ID (\d+) \] fossilize_replay completed")
+MANIFEST_FIELD = re.compile(rb'^\s*"(appid|name|StateFlags|BytesToDownload|BytesDownloaded|BytesToStage|BytesStaged)"\s+"([^"]*)"', re.M)
+QUEUE = re.compile(rb'"ProcessingQueue"\s+"([^"]*)"')
+LAUNCH = re.compile(rb"SteamLaunch\x00AppId=(\d{1,10})(?:\x00|$)")
+
+TICKS = os.sysconf("SC_CLK_TCK")
+
+
+def epoch(stamp):
+    """Steam's log timestamps are local time."""
+    try:
+        return int(time.mktime(time.strptime(stamp, "%Y-%m-%d %H:%M:%S")))
+    except ValueError:
+        return 0
+
+
+def boot_time():
+    with open("/proc/stat", "rb") as handle:
+        for line in handle:
+            if line.startswith(b"btime "):
+                return int(line.split()[1])
+    return 0
+
+
+class LogTail:
+    """Feeds a handler the complete lines appended to a log since the last
+    call, and says whether there were any. The first call goes through the
+    whole file, a megabyte at a time, so state from before the watcher started
+    is known without holding the file in memory. A new inode or a shorter
+    file means Steam rotated it."""
+
+    def __init__(self, path):
+        self.path = path
+        self.inode = None
+        self.offset = 0
+        self.partial = b""
+
+    def read(self, handler):
+        try:
+            info = os.stat(self.path)
+        except OSError:
+            return False
+        if info.st_ino != self.inode or info.st_size < self.offset:
+            self.inode, self.offset, self.partial = info.st_ino, 0, b""
+        if info.st_size == self.offset:
+            return False
+        with open(self.path, "rb") as handle:
+            handle.seek(self.offset)
+            while self.offset < info.st_size:
+                data = handle.read(min(CHUNK, info.st_size - self.offset))
+                if not data:
+                    break
+                self.offset += len(data)
+                lines = (self.partial + data).split(b"\n")
+                self.partial = lines.pop()
+                for line in lines:
+                    handler(line.decode("utf-8", "replace"))
+        return True
+
+
+class Watcher:
+    def __init__(self, root):
+        self.root = root
+        self.content = LogTail(os.path.join(root, "logs/content_log.txt"))
+        self.shader_log = os.path.join(root, "logs/shader_log.txt")
+        self.config = os.path.join(root, "config/config.vdf")
+        self.folders = os.path.join(root, "steamapps/libraryfolders.vdf")
+        self.btime = boot_time()
+
+        self.stamps = {}          # path -> mtime_ns of every watched file
+        self.libraries = []
+        self.manifests = {}       # path -> parsed fields
+        self.states = {}          # appid -> last "state changed" text
+        self.rate, self.rate_at = 0, 0
+        self.queue = []
+        self.job = None           # the shader job Steam last started
+        self.processes = {"reaper": None, "fossilize": []}
+        self.last_proc_walk = 0.0
+        self.preallocated = {}    # appid -> MB Steam reserved before staging
+        self.workshop = {}        # appid -> Workshop job: running, stopping, total, stageTotal
+        self.workshop_files = {}  # appid -> what its appworkshop_<id>.acf says
+        # Keyed by appid for games and "workshop/<appid>" for Workshop items.
+        self.staging = {}         # key -> (monotonic time, bytes in its staging folder)
+        self.progress = {}        # key -> best downloaded estimate, never goes back
+        self.last_progress = 0.0
+
+        # The rotated shader log may hold the start of the job in progress.
+        self.shaders = LogTail(self.shader_log)
+        previous = os.path.join(root, "logs/shader_log.previous.txt")
+        if os.path.exists(previous):
+            LogTail(previous).read(self.parse_shader_line)
+
+    # ---- Change detection ---------------------------------------------------
+
+    def changed(self, path):
+        try:
+            stamp = os.stat(path).st_mtime_ns
+        except OSError:
+            stamp = None
+        if self.stamps.get(path) == stamp:
+            return False
+        self.stamps[path] = stamp
+        return True
+
+    def manifest_paths(self):
+        paths = []
+        for library in self.libraries:
+            try:
+                with os.scandir(os.path.join(library["path"], "steamapps")) as entries:
+                    paths.extend(e.path for e in entries
+                                 if e.name.startswith("appmanifest_") and e.name.endswith(".acf"))
+            except OSError:
+                pass
+        return paths
+
+    # ---- Parsing ----------------------------------------------------------------
+
+    def read_manifest(self, path):
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read(1024 * 1024)
+        except OSError:
+            return None
+        fields = {}
+        # The game's own counters come first; each depot repeats them further
+        # down, so later matches must not overwrite earlier ones.
+        for key, value in MANIFEST_FIELD.findall(data):
+            fields.setdefault(key.decode(), value.decode("utf-8", "replace"))
+        return fields if fields.get("appid", "").isdigit() else None
+
+    def parse_content_line(self, line):
+        match = STATE_CHANGED.search(line)
+        if match:
+            appid, state = match.group(1), match.group(2)
+            self.states[appid] = state
+            # Steam quitting or crashing mid-job never logs the job's end; the
+            # app's state when it comes back says nothing runs any more.
+            job = self.workshop.get(appid)
+            if job and job["running"] and "Update Running" not in state:
+                job["running"] = False
+            return
+        match = WORKSHOP_CHANGED.search(line)
+        if match:
+            self.workshop_phase(match.group(1), match.group(2).strip())
+            return
+        match = UPDATE_STARTED.search(line)
+        if match:
+            # Jobs of one app run one after another, so a size logged while its
+            # Workshop job runs belongs to that job and not to the game.
+            job = self.workshop.get(match.group(1))
+            if job and job["running"]:
+                job["total"], job["stageTotal"] = int(match.group(3)), int(match.group(5))
+            return
+        match = SCHEDULE_REMOVED.search(line)
+        if match:
+            self.workshop.pop(match.group(1), None)
+            return
+        match = PREALLOCATED.search(line)
+        if match:
+            self.preallocated[match.group(1)] = int(match.group(2))
+            return
+        match = RATE.search(line)
+        stamp = STAMP.match(line) if match else None
+        if stamp:
+            self.rate = int(float(match.group(1)) * 1000000 / 8)
+            self.rate_at = epoch(stamp.group(1))
+
+    def workshop_phase(self, appid, phase):
+        """A Workshop job ends with None: committed when it simply ran out of
+        work, stopped when Stopping came first (paused, or Steam quitting).
+        A stopped job keeps its sizes, so resuming it does not read as a new
+        job in the second before Steam logs them again. Jobs with nothing to
+        download never log a size and never show."""
+        job = self.workshop.get(appid)
+        if phase != "None":
+            if job is None:
+                job = self.workshop[appid] = {"running": False, "stopping": False, "total": 0, "stageTotal": 0}
+            if not job["running"]:
+                job["running"], job["stopping"] = True, False
+            if "Stopping" in phase:
+                job["stopping"] = True
+        elif job is not None:
+            if job["stopping"]:
+                job["running"] = False
+            else:
+                del self.workshop[appid]
+
+    def read_workshop_file(self, path):
+        """Whether Steam still wants anything for this app's Workshop, and how
+        many subscribed items are missing or behind their latest version."""
+        root = child(load_text_vdf(path), "AppWorkshop")
+        installed = child(root, "WorkshopItemsInstalled")
+        details = child(root, "WorkshopItemDetails")
+        pending = 0
+        for item, info in (details.items() if isinstance(details, dict) else ()):
+            latest = child(info, "latest_manifest")
+            if latest and latest != child(installed, item, "manifest"):
+                pending += 1
+        needed = as_int(child(root, "NeedsDownload")) or as_int(child(root, "NeedsUpdate"))
+        return {"path": path, "needed": bool(needed), "items": pending}
+
+    def parse_shader_line(self, line):
+        match = JOB_STARTED.search(line)
+        if match:
+            stamp = STAMP.match(line)
+            self.job = {"app": match.group(1), "started": epoch(stamp.group(1)) if stamp else 0,
+                        "percent": 0, "merging": False}
+            return
+        if not self.job:
+            return
+        match = REPLAYING.search(line)
+        if match:
+            if match.group(1) == self.job["app"]:
+                self.job["percent"] = int(match.group(2))
+            return
+        if "Done with replay" in line:
+            self.job["merging"] = True
+            return
+        match = JOB_DONE.search(line)
+        if match and match.group(1) == self.job["app"]:
+            self.job = None
+
+    def read_queue(self):
+        try:
+            with open(self.config, "rb") as handle:
+                match = QUEUE.search(handle.read(16 * 1024 * 1024))
+        except OSError:
+            match = None
+        ids = match.group(1).decode().split(";") if match else []
+        self.queue = [i for i in ids if i.isdigit()]
+
+    def walk_proc(self):
+        """reaper (the game being played) and fossilize_replay (shaders), reading
+        each process's comm first and its command line only for those two."""
+        reaper, fossilize = None, []
+        for entry in os.scandir("/proc"):
+            if not entry.name.isdigit():
+                continue
+            try:
+                with open("/proc/%s/comm" % entry.name, "rb") as handle:
+                    comm = handle.read().strip()
+                if comm not in (b"reaper", b"fossilize_repla"):
+                    continue
+                with open("/proc/%s/cmdline" % entry.name, "rb") as handle:
+                    cmdline = handle.read(65536)
+                with open("/proc/%s/stat" % entry.name, "rb") as handle:
+                    stat = handle.read().rsplit(b")", 1)[1].split()
+            except OSError:
+                continue
+            nice, started = int(stat[16]), int(stat[19])
+            if comm == b"reaper":
+                match = LAUNCH.search(cmdline)
+                if match and (reaper is None or started > reaper["ticks"]):
+                    reaper = {"id": match.group(1).decode(), "ticks": started}
+            elif b"ubuntu12_64/fossilize_replay" in cmdline:
+                fossilize.append((int(entry.name), nice))
+        self.processes = {"reaper": reaper, "fossilize": sorted(fossilize)}
+        self.last_proc_walk = time.monotonic()
+
+    # ---- State -----------------------------------------------------------------
+
+    def name(self, appid):
+        for fields in self.manifests.values():
+            if fields.get("appid") == appid and fields.get("name"):
+                return fields["name"]
+        return "App %s" % appid
+
+    def library_of(self, appid):
+        for path, fields in self.manifests.items():
+            if fields.get("appid") == appid:
+                return os.path.dirname(os.path.dirname(path))
+        return None
+
+    def staged_bytes(self, key, folder):
+        """Bytes already written to a staging folder (downloading/<appid> for
+        a game, workshop/downloads/<appid> for its Workshop items), walked at
+        most every PROGRESS_EVERY seconds."""
+        cached = self.staging.get(key)
+        if cached and time.monotonic() - cached[0] < PROGRESS_EVERY:
+            return cached[1]
+        total = 0
+        for path, _, files in os.walk(folder):
+            for name in files:
+                try:
+                    total += os.lstat(os.path.join(path, name)).st_blocks * 512
+                except OSError:
+                    pass
+        self.staging[key] = (time.monotonic(), total)
+        return total
+
+    def live_done(self, key, appid, folder, total, done, stage_total, staged):
+        """Downloaded bytes right now. The manifest is stale while Steam
+        downloads, so the staging folder's share of what has to be staged is
+        scaled to the download size, the number Steam itself shows. Space Steam
+        reserved up front would read as progress, so then the manifest stands."""
+        if total <= 0 or stage_total <= 0 or self.preallocated.get(appid, 0) > 0:
+            return done
+        written = max(staged, self.staged_bytes(key, folder))
+        estimate = int(total * min(1.0, written / stage_total))
+        best = max(done, estimate, self.progress.get(key, 0))
+        self.progress[key] = best
+        return best
+
+    def downloads(self, now):
+        items = []
+        for path, fields in self.manifests.items():
+            flags = as_int(fields.get("StateFlags"))
+            if not (flags & 2 or flags & 1024):
+                continue
+            appid = fields["appid"]
+            total, done = as_int(fields.get("BytesToDownload")), as_int(fields.get("BytesDownloaded"))
+            stage_total, staged = as_int(fields.get("BytesToStage")), as_int(fields.get("BytesStaged"))
+            state = self.states.get(appid, "")
+            status = "paused" if "(Suspended)" in state else "downloading" if "Update Running" in state else "queued"
+            # Nothing left to fetch or stage and not running: an update Steam
+            # knows about but has not sized or started yet, which is not activity.
+            if status != "downloading" and not (total > done or stage_total > staged):
+                continue
+            library = os.path.dirname(os.path.dirname(path))
+            if status == "downloading":
+                done = self.live_done(appid, appid, os.path.join(library, "steamapps/downloading", appid),
+                                      total, done, stage_total, staged)
+            items.append({
+                "id": appid, "name": fields.get("name") or "App %s" % appid, "status": status,
+                "kind": "update" if flags & 4 else "install", "library": library,
+                "total": total, "done": done, "stageTotal": stage_total, "staged": staged,
+                "rate": self.rate if status == "downloading" and now - self.rate_at < RATE_FRESH else 0,
+            })
+        for appid, job in self.workshop.items():
+            library = self.library_of(appid)
+            files = self.workshop_files.get(appid, {})
+            # A stopped job whose items Steam no longer wants (unsubscribed,
+            # or finished some other way) is not waiting for anything.
+            if job["total"] <= 0 or not library or not (job["running"] or files.get("needed")):
+                continue
+            key = "workshop/" + appid
+            if job["running"] or key not in self.progress:
+                done = self.live_done(key, appid, os.path.join(library, "steamapps/workshop/downloads", appid),
+                                      job["total"], 0, job["stageTotal"], 0)
+            else:
+                done = self.progress[key]
+            items.append({
+                "id": appid, "name": self.name(appid), "status": "downloading" if job["running"] else "paused",
+                "kind": "workshop", "library": library, "items": files.get("items", 0),
+                "total": job["total"], "done": done, "stageTotal": job["stageTotal"], "staged": 0,
+                "rate": self.rate if job["running"] and now - self.rate_at < RATE_FRESH else 0,
+            })
+        active = {"workshop/" + d["id"] if d["kind"] == "workshop" else d["id"] for d in items}
+        for key in list(self.progress):
+            if key not in active:
+                del self.progress[key]
+                self.staging.pop(key, None)
+        order = {"downloading": 0, "queued": 1, "paused": 2}
+        items.sort(key=lambda d: (order[d["status"]], d["name"].lower(), d["kind"] == "workshop"))
+        return items
+
+    def shader_state(self, now):
+        if not self.queue:
+            return None
+        fossilize = self.processes["fossilize"]
+        if not fossilize:
+            # Nothing compiling, but Steam may still be merging the last game
+            # into the driver cache, which logs every so often.
+            try:
+                if now - os.stat(self.shader_log).st_mtime >= SHADER_QUIET:
+                    return None
+            except OSError:
+                return None
+        job = self.job
+        if job is None:
+            # Only fossilize_replay tells a job about to log its start apart
+            # from a queue that is simply waiting.
+            if not fossilize:
+                return None
+            app, phase, percent, started = "", "starting", 0, 0
+        else:
+            app, started = job["app"], job["started"]
+            phase = "merging" if job["merging"] or not fossilize else "replaying"
+            percent = 100 if phase == "merging" else job["percent"]
+        # Every worker shares the master's command line; the oldest is the master.
+        # Steam drops it to nice 19 in the background; the pass right before a
+        # game launches keeps normal priority.
+        mode = "launch" if fossilize and fossilize[0][1] != 19 else "background"
+        return {
+            "app": app, "name": self.name(app) if app else "", "mode": mode, "phase": phase,
+            "percent": percent, "startedAt": started, "workers": max(0, len(fossilize) - 1),
+            "queue": [{"id": i, "name": self.name(i)} for i in self.queue if i != app],
+        }
+
+    def running(self):
+        reaper = self.processes["reaper"]
+        if not reaper:
+            return None
+        return {"id": reaper["id"], "name": self.name(reaper["id"]),
+                "startedAt": self.btime + reaper["ticks"] // TICKS}
+
+    # ---- Loop -----------------------------------------------------------------
+
+    def tick(self):
+        dirty = False
+        if self.changed(self.folders) or not self.libraries:
+            self.libraries = libraries(self.root)
+            dirty = True
+
+        paths = self.manifest_paths()
+        for gone in set(self.manifests) - set(paths):
+            del self.manifests[gone]
+            self.stamps.pop(gone, None)
+            dirty = True
+        for path in paths:
+            if self.changed(path):
+                fields = self.read_manifest(path)
+                if fields:
+                    self.manifests[path] = fields
+                else:
+                    self.manifests.pop(path, None)
+                dirty = True
+
+        if self.content.read(self.parse_content_line):
+            dirty = True
+        # Only apps with a Workshop job have their appworkshop_<id>.acf read.
+        for appid in set(self.workshop_files) - set(self.workshop):
+            self.stamps.pop(self.workshop_files.pop(appid)["path"], None)
+        for appid in self.workshop:
+            library = self.library_of(appid)
+            if library:
+                path = os.path.join(library, "steamapps/workshop/appworkshop_%s.acf" % appid)
+                if self.changed(path):
+                    self.workshop_files[appid] = self.read_workshop_file(path)
+                    dirty = True
+        if self.shaders.read(self.parse_shader_line):
+            dirty = True
+        if self.changed(self.config):
+            self.read_queue()
+            dirty = True
+
+        if dirty or time.monotonic() - self.last_proc_walk >= PROC_EVERY:
+            self.walk_proc()
+            dirty = True
+        if self.progress and time.monotonic() - self.last_progress >= PROGRESS_EVERY:
+            dirty = True
+        if dirty:
+            self.last_progress = time.monotonic()
+        return dirty
+
+    def state(self):
+        now = time.time()
+        return {"running": self.running(), "downloads": self.downloads(now),
+                "shaders": self.shader_state(now), "queued": len(self.queue)}
+
+
+def emit(state, last):
+    line = json.dumps(state, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    if line != last:
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+    return line
+
+
+def main():
+    # Leave with the bar: SIGTERM when the parent dies (prctl PR_SET_PDEATHSIG),
+    # and a closed pipe ends the loop below.
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM)
+    except (OSError, AttributeError):
+        pass
+    if os.getppid() == 1:
+        return
+
+    last = None
+    watcher = None
+    while True:
+        if watcher is None:
+            root = steam_root()
+            if root:
+                watcher = Watcher(root)
+            else:
+                last = emit({"running": None, "downloads": [], "shaders": None, "queued": 0}, last)
+                time.sleep(60)
+                continue
+        if watcher.tick() or last is None:
+            last = emit(watcher.state(), last)
+        time.sleep(TICK)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (BrokenPipeError, KeyboardInterrupt):
+        pass

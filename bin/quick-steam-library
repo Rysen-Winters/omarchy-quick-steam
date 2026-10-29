@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""Print the Steam library as one JSON object, read entirely from local files.
+
+Nothing is written and nothing leaves the machine. Sources, all under the
+Steam root:
+
+  steamapps/libraryfolders.vdf        every library folder
+  <library>/steamapps/appmanifest_*   installed games: size, state, last played
+  appcache/packageinfo.vdf            the account's licenses, so owned games
+                                      that are not installed can be listed
+  appcache/appinfo.vdf                name, type, genres, OS list, Steam Deck
+                                      rating and review score of every app
+  userdata/<id>/config/localconfig.vdf
+                                      last played and playtime per game
+  config/config.vdf                   the compatibility tool (Proton) per game
+  appcache/librarycache/<appid>/      cover art Steam already downloaded
+  registry.vdf                        the game running right now
+
+Every file is treated as untrusted input: sizes are capped, parsing failures
+skip the file instead of failing the whole run, and only digits are accepted
+as app ids.
+"""
+
+import glob
+import json
+import os
+import re
+import struct
+import sys
+
+MAX_BINARY = 256 * 1024 * 1024
+STEAMID64_BASE = 76561197960265728
+
+# -I keeps the script's own folder off sys.path; the shared helpers live there.
+# No bytecode cache: the plugin folder is a git checkout.
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from quick_steam_common import (  # noqa: E402
+    APPID, MAX_TEXT, as_int, child, libraries, load_text_vdf, read_file, steam_root,
+)
+
+
+# ---- Binary VDF (appinfo.vdf / packageinfo.vdf) --------------------------------
+
+def read_cstring(buf, pos):
+    end = buf.index(b"\0", pos)
+    return buf[pos:end].decode("utf-8", "replace"), end + 1
+
+
+def parse_binary_kv(buf, pos, strings=None, depth=0):
+    if depth > 32:
+        raise ValueError("too deep")
+    out = {}
+    while True:
+        kind = buf[pos]
+        pos += 1
+        if kind == 0x08:
+            return out, pos
+        if strings is None:
+            key, pos = read_cstring(buf, pos)
+        else:
+            (index,) = struct.unpack_from("<I", buf, pos)
+            pos += 4
+            key = strings[index]
+        if kind == 0x00:
+            out[key], pos = parse_binary_kv(buf, pos, strings, depth + 1)
+        elif kind == 0x01:
+            out[key], pos = read_cstring(buf, pos)
+        elif kind in (0x02, 0x03, 0x04, 0x06):
+            (out[key],) = struct.unpack_from("<f" if kind == 0x03 else "<i", buf, pos)
+            pos += 4
+        elif kind in (0x07, 0x0A):
+            (out[key],) = struct.unpack_from("<Q" if kind == 0x07 else "<q", buf, pos)
+            pos += 8
+        else:
+            raise ValueError("unknown type %#x" % kind)
+
+
+def load_appinfo(root):
+    """{appid: common section} from appinfo.vdf (format 0x07564429 / 0x07564428)."""
+    buf = read_file(os.path.join(root, "appcache/appinfo.vdf"), MAX_BINARY)
+    if not buf or len(buf) < 16:
+        return {}
+    magic = struct.unpack_from("<I", buf, 0)[0]
+    strings, pos = None, 8
+    if magic == 0x07564429:
+        (table,) = struct.unpack_from("<q", buf, 8)
+        (count,) = struct.unpack_from("<I", buf, table)
+        strings, cursor = [], table + 4
+        for _ in range(count):
+            value, cursor = read_cstring(buf, cursor)
+            strings.append(value)
+        pos = 16
+    elif magic != 0x07564428:
+        return {}
+    apps = {}
+    try:
+        while pos + 8 <= len(buf):
+            appid, size = struct.unpack_from("<II", buf, pos)
+            if appid == 0:
+                break
+            try:
+                kv, _ = parse_binary_kv(buf, pos + 8 + 60, strings)
+                common = child(kv, "appinfo", "common") or child(kv, "common")
+                if common:
+                    apps[appid] = common
+            except (ValueError, IndexError, struct.error):
+                pass
+            pos += 8 + size
+    except struct.error:
+        pass
+    return apps
+
+
+def load_owned(root):
+    """App ids granted by the account's licenses. Package 0 is Steam's own."""
+    buf = read_file(os.path.join(root, "appcache/packageinfo.vdf"), MAX_BINARY)
+    owned = set()
+    if not buf or len(buf) < 8:
+        return owned
+    magic = struct.unpack_from("<I", buf, 0)[0]
+    if magic not in (0x06565527, 0x06565528):
+        return owned
+    pos = 8
+    try:
+        while pos + 4 <= len(buf):
+            (package,) = struct.unpack_from("<I", buf, pos)
+            if package == 0xFFFFFFFF:
+                break
+            pos += 4 + 20 + 4 + (8 if magic == 0x06565528 else 0)
+            kv, pos = parse_binary_kv(buf, pos)
+            if package == 0:
+                continue
+            body = kv.get(str(package), kv)
+            for value in (child(body, "appids") or {}).values():
+                owned.add(as_int(value))
+    except (ValueError, IndexError, struct.error):
+        pass
+    return owned
+
+
+# ---- Everything else ----------------------------------------------------------
+
+def current_user(root):
+    login = load_text_vdf(os.path.join(root, "config/loginusers.vdf"))
+    users = child(login, "users") or {}
+    best, best_time = None, -1
+    for steamid, info in users.items():
+        if not APPID.match(steamid[-10:]) or not isinstance(info, dict):
+            continue
+        stamp = as_int(child(info, "Timestamp"))
+        if child(info, "MostRecent") == "1":
+            stamp = 1 << 62
+        if stamp > best_time:
+            best, best_time = steamid, stamp
+    if best and best.isdigit():
+        account = str(int(best) - STEAMID64_BASE)
+        if os.path.isdir(os.path.join(root, "userdata", account)):
+            return account
+    dirs = [d for d in glob.glob(os.path.join(root, "userdata/*")) if os.path.basename(d).isdigit()]
+    return os.path.basename(max(dirs, key=os.path.getmtime)) if dirs else None
+
+
+SAFE_ASSET = re.compile(r"^(?:[0-9a-f]{40}/)?[A-Za-z0-9_.-]{1,80}\.(?:jpg|png)$")
+
+
+# Each kind of art: its key in appinfo's library_assets_full, the file older
+# apps keep at the top of their folder, and the names newer apps use inside a
+# hashed subfolder (localized variants included).
+ART = {
+    "capsule": ("library_capsule", "library_600x900.jpg", ("*/library_capsule*.jpg", "*/library_600x900*.jpg")),
+    "header": ("library_header", "header.jpg", ("*/library_header*.jpg", "*/header*.jpg")),
+}
+
+
+def art_asset(common, kind):
+    """The art's path relative to the app's asset folder, e.g.
+    "<sha1>/library_capsule.jpg" for newer apps or "library_600x900.jpg"."""
+    key, legacy, _ = ART[kind]
+    images = child(common, "library_assets_full", key, "image")
+    if isinstance(images, dict):
+        value = images.get("english") or next(iter(images.values()), "")
+        if isinstance(value, str) and SAFE_ASSET.match(value):
+            return value
+    return legacy
+
+
+def local_art(root, appid, asset, kind):
+    """Art Steam already downloaded into appcache/librarycache, or ""."""
+    _, legacy, patterns = ART[kind]
+    base = os.path.join(root, "appcache/librarycache", str(appid))
+    for path in (os.path.join(base, asset), os.path.join(base, legacy)):
+        if os.path.isfile(path):
+            return path
+    for pattern in patterns:
+        matches = sorted((m for m in glob.glob(os.path.join(base, pattern)) if "_2x" not in m), key=len)
+        if matches:
+            return matches[0]
+    return ""
+
+
+def running_app():
+    registry = load_text_vdf(os.path.expanduser("~/.steam/registry.vdf"))
+    value = child(registry, "Registry", "HKCU", "Software", "Valve", "Steam", "RunningAppID")
+    return value if isinstance(value, str) and APPID.match(value) and value != "0" else ""
+
+
+def main():
+    root = steam_root()
+    if not root:
+        print(json.dumps({"ok": False, "error": "steam-not-found"}))
+        return
+
+    libs = libraries(root)
+    appinfo = load_appinfo(root)
+    owned = load_owned(root)
+
+    def kind(appid):
+        return str(child(appinfo.get(appid, {}), "type")).lower()
+
+    installed = {}
+    for index, lib in enumerate(libs):
+        for manifest in glob.glob(os.path.join(lib["path"], "steamapps/appmanifest_*.acf")):
+            state = child(load_text_vdf(manifest), "AppState")
+            appid = as_int(child(state, "appid"), -1)
+            if appid <= 0 or (appid in appinfo and kind(appid) != "game"):
+                continue
+            installed[appid] = {
+                "library": index,
+                "name": child(state, "name") if isinstance(child(state, "name"), str) else "",
+                "size": as_int(child(state, "SizeOnDisk")),
+                "state": as_int(child(state, "StateFlags")),
+                "lastPlayed": as_int(child(state, "LastPlayed")),
+            }
+            lib.setdefault("games", 0)
+            lib["games"] = lib["games"] + 1
+            lib["used"] = lib.get("used", 0) + installed[appid]["size"]
+
+    played = {}
+    user = current_user(root)
+    if user:
+        localconfig = load_text_vdf(os.path.join(root, "userdata", user, "config/localconfig.vdf"))
+        apps = child(localconfig, "UserLocalConfigStore", "Software", "Valve", "Steam", "apps")
+        for appid, info in (apps or {}).items():
+            if APPID.match(appid) and isinstance(info, dict):
+                played[int(appid)] = (as_int(child(info, "LastPlayed")), as_int(child(info, "Playtime")))
+
+    config = load_text_vdf(os.path.join(root, "config/config.vdf"))
+    mapping = child(config, "InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping")
+    tools = {k: child(v, "name") for k, v in (mapping or {}).items() if isinstance(v, dict)}
+    default_tool = tools.get("0") if isinstance(tools.get("0"), str) else ""
+
+    games = []
+    for appid in sorted((owned & {a for a in appinfo if kind(a) == "game"}) | set(installed)):
+        common = appinfo.get(appid, {})
+        local = installed.get(appid)
+        name = child(common, "name") or (local or {}).get("name") or ""
+        if not isinstance(name, str) or not name:
+            continue
+        linux = "linux" in str(child(common, "oslist")).lower()
+        tool = tools.get(str(appid))
+        tool = tool if isinstance(tool, str) and tool else ("" if linux else default_tool)
+        last, playtime = played.get(appid, (0, 0))
+        if local and local["lastPlayed"] > last:
+            last = local["lastPlayed"]
+        deck = child(common, "steam_deck_compatibility")
+        genres = child(common, "genres")
+        asset = art_asset(common, "capsule")
+        header_asset = art_asset(common, "header")
+        games.append({
+            "id": str(appid),
+            "name": name,
+            "installed": local is not None,
+            "library": local["library"] if local else -1,
+            "size": local["size"] if local else 0,
+            "state": local["state"] if local else 0,
+            "lastPlayed": last,
+            "playtime": playtime,
+            "tool": tool,
+            "linux": linux,
+            "deck": as_int(child(deck, "category")),
+            "steamos": as_int(child(deck, "steamos_compatibility")),
+            "genres": [as_int(v) for v in genres.values()] if isinstance(genres, dict) else [],
+            "review": as_int(child(common, "review_percentage")),
+            "release": as_int(child(common, "steam_release_date")) or as_int(child(common, "original_release_date")),
+            "art": local_art(root, appid, asset, "capsule"),
+            "asset": asset,
+            "header": local_art(root, appid, header_asset, "header"),
+            "headerAsset": header_asset,
+        })
+
+    games.sort(key=lambda g: (-g["lastPlayed"], g["name"].lower()))
+    print(json.dumps({
+        "ok": True,
+        "root": root,
+        "running": running_app(),
+        "defaultTool": default_tool,
+        "libraries": [{k: lib.get(k, 0) for k in ("path", "label", "free", "total", "games", "used")} for lib in libs],
+        "games": games,
+    }, ensure_ascii=False, separators=(",", ":")))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:  # Never hand the shell a traceback instead of JSON.
+        print(json.dumps({"ok": False, "error": type(error).__name__}))
+        sys.exit(0)

@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.rysen-winters.quick-steam",
+  "name": "Quick Steam",
+  "version": "0.1.0",
+  "author": "Rysen Winters",
+  "license": "MIT",
+  "repository": "https://github.com/Rysen-Winters/omarchy-quick-steam",
+  "description": "Your Steam library one key away, with what Steam is doing right now: downloads, updates, Workshop items and shader pre-caching with progress bars, ProtonDB ratings, the Proton version per game and free space per library.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Quick Steam",
+    "description": "Steam library launcher with live download and shader progress.",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "language": "auto",
+      "showActivity": true,
+      "showLibrary": true,
+      "showDetails": true,
+      "showProgress": true,
+      "notifyDownloads": true,
+      "notifyShaders": true
+    },
+    "schema": [
+      {
+        "key": "language",
+        "type": "enum",
+        "label": "Language",
+        "options": [
+          "auto",
+          "en",
+          "es"
+        ],
+        "defaultValue": "auto",
+        "description": "Language of the panel, the tooltip and the notifications. auto follows the system."
+      },
+      {
+        "key": "showActivity",
+        "type": "boolean",
+        "label": "Show activity",
+        "defaultValue": true,
+        "description": "Downloads, updates and shader pre-caching in progress, at the top of the panel."
+      },
+      {
+        "key": "showLibrary",
+        "type": "boolean",
+        "label": "Show the game list",
+        "defaultValue": true,
+        "description": "Installed and not installed games, with search. Activity or the game list always stays on."
+      },
+      {
+        "key": "showDetails",
+        "type": "boolean",
+        "label": "Show game details",
+        "defaultValue": true,
+        "description": "Cover, ProtonDB, Proton version and store description of the selected game. Needs the game list."
+      },
+      {
+        "key": "showProgress",
+        "type": "boolean",
+        "label": "Show progress in the bar",
+        "description": "Show the percentage and a progress line under the icon while Steam downloads or compiles shaders.",
+        "defaultValue": true
+      },
+      {
+        "key": "notifyDownloads",
+        "type": "boolean",
+        "label": "Notify finished downloads",
+        "description": "Send a notification when a game finishes installing or updating.",
+        "defaultValue": true
+      },
+      {
+        "key": "notifyShaders",
+        "type": "boolean",
+        "label": "Notify finished shaders",
+        "description": "Send a notification when Steam empties its shader queue after more than a minute of background processing.",
+        "defaultValue": true
+      }
+    ]
+  }
+}

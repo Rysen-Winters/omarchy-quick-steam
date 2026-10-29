@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Store description, ProtonDB rating and cover art for one Steam game.
+
+    quick-steam-details <appid> [--lang en|es]
+    quick-steam-details <appid> --cover [<asset path from quick-steam-library>]
+    quick-steam-details <appid> --header [<asset path from quick-steam-library>]
+
+Prints one JSON object. These are the only network requests Quick Steam makes,
+all to public endpoints that need no key or login:
+
+  store.steampowered.com/api/appdetails      short description (cached 30 days)
+  www.protondb.com/api/v1/reports/summaries  ProtonDB tier (cached 3 days)
+  shared.steamstatic.com                     cover art, only for games Steam has
+                                             no local copy of (cached 30 days)
+
+Everything lands in ~/.cache/quick-steam. Responses are size-capped, and a
+cover is only kept if it really is a JPEG or PNG under 2 MB.
+"""
+
+import html
+import json
+import os
+import re
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "quick-steam")
+DAY = 86400
+TIMEOUT = 8
+MAX_JSON = 2 * 1024 * 1024
+MAX_IMAGE = 2 * 1024 * 1024
+USER_AGENT = "quick-steam/1.0 (Omarchy plugin)"
+STORE_LANGUAGES = {"es": "spanish", "en": "english"}
+
+
+def fetch(url, limit):
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+        if response.status != 200:
+            return None
+        data = response.read(limit + 1)
+        return None if len(data) > limit else data
+
+
+def fresh(path, max_age):
+    try:
+        return time.time() - os.path.getmtime(path) < max_age
+    except OSError:
+        return False
+
+
+def write_atomic(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    handle, temp = tempfile.mkstemp(dir=os.path.dirname(path))
+    with os.fdopen(handle, "wb") as out:
+        out.write(data)
+    os.replace(temp, path)
+
+
+def cached_json(path, max_age, url, extract):
+    """Cached value, refreshed from url when stale. A failed refresh keeps the old one."""
+    if fresh(path, max_age):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            pass
+    try:
+        data = fetch(url, MAX_JSON)
+        value = extract(json.loads(data)) if data else None
+        write_atomic(path, json.dumps(value).encode())
+        return value
+    except (OSError, ValueError, urllib.error.URLError):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            return None
+
+
+def store_description(appid, lang):
+    def extract(payload):
+        data = (payload.get(appid) or {}).get("data") or {}
+        text = html.unescape(re.sub(r"<[^>]+>", " ", data.get("short_description") or ""))
+        return {"description": re.sub(r"\s+", " ", text).strip()[:600]}
+
+    url = "https://store.steampowered.com/api/appdetails?appids=%s&l=%s&filters=basic" % (
+        appid, STORE_LANGUAGES.get(lang, "english"))
+    return cached_json(os.path.join(CACHE, "store", "%s.%s.json" % (appid, lang)), 30 * DAY, url, extract) or {}
+
+
+def protondb(appid):
+    def extract(payload):
+        keys = ("tier", "bestReportedTier", "trendingTier", "confidence", "total")
+        return {k: payload.get(k) for k in keys if isinstance(payload.get(k), (str, int))}
+
+    url = "https://www.protondb.com/api/v1/reports/summaries/%s.json" % appid
+    return cached_json(os.path.join(CACHE, "protondb", "%s.json" % appid), 3 * DAY, url, extract)
+
+
+SAFE_ASSET = re.compile(r"(?:[0-9a-f]{40}/)?[A-Za-z0-9_.-]{1,80}\.(?:jpg|png)")
+
+
+def cover(appid, asset, kind="capsule"):
+    """kind "capsule" is the portrait cover, "header" the store banner."""
+    name = "%s.jpg" % appid if kind == "capsule" else "%s.header.jpg" % appid
+    path = os.path.join(CACHE, "covers", name)
+    if fresh(path, 30 * DAY if os.path.exists(path) and os.path.getsize(path) > 0 else DAY):
+        return path if os.path.getsize(path) > 0 else ""
+    base = "https://shared.steamstatic.com/store_item_assets/steam/apps/%s/" % appid
+    candidates = [base + asset] if asset and SAFE_ASSET.fullmatch(asset) else []
+    fallback = "library_600x900.jpg" if kind == "capsule" else "header.jpg"
+    for url in candidates + [base + fallback]:
+        try:
+            data = fetch(url, MAX_IMAGE)
+        except (OSError, urllib.error.URLError):
+            continue
+        if data and (data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n"):
+            write_atomic(path, data)
+            return path
+    # Remember the miss for a day so a game without art is not refetched on every open.
+    write_atomic(path, b"")
+    return ""
+
+
+def main():
+    args = sys.argv[1:]
+    appid = args[0] if args else ""
+    if not re.fullmatch(r"[0-9]{1,10}", appid):
+        print(json.dumps({"error": "bad-appid"}))
+        return
+    lang = args[args.index("--lang") + 1] if "--lang" in args and args.index("--lang") + 1 < len(args) else "en"
+    lang = lang if lang in STORE_LANGUAGES else "en"
+
+    for flag, kind in (("--cover", "capsule"), ("--header", "header")):
+        if flag in args:
+            position = args.index(flag) + 1
+            asset = args[position] if position < len(args) else ""
+            print(json.dumps({"id": appid, "cover": cover(appid, asset, kind)}))
+            return
+    print(json.dumps({
+        "id": appid,
+        "description": store_description(appid, lang).get("description", ""),
+        "protondb": protondb(appid),
+    }, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:  # Never hand the shell a traceback instead of JSON.
+        print(json.dumps({"error": type(error).__name__}))
