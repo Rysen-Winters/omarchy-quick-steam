@@ -22,7 +22,8 @@ game and the free space left on every Steam library.
     background or before a game launches, and how many games are queued.
 - **Library:**
   - installed and not installed games, read from your Steam licences, so
-    games Steam has never downloaded are listed too;
+    games Steam has never downloaded are listed too, while refunded games
+    and expired free weekends are left out;
   - search, and sorting by recent, name or size;
   - covers.
 - **Details** of the selected game:

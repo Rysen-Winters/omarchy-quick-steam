@@ -6,7 +6,9 @@ Steam root:
 
   steamapps/libraryfolders.vdf        every library folder
   <library>/steamapps/appmanifest_*   installed games: size, state, last played
-  appcache/packageinfo.vdf            the account's licenses, so owned games
+  userdata/<id>/config/licensecache   the packages the account holds a live
+                                      license for (see load_licenses)
+  appcache/packageinfo.vdf            the apps in each package, so owned games
                                       that are not installed can be listed
   appcache/appinfo.vdf                name, type, genres, OS list, Steam Deck
                                       rating and review score of every app
@@ -27,6 +29,7 @@ import os
 import re
 import struct
 import sys
+import zlib
 
 MAX_BINARY = 256 * 1024 * 1024
 STEAMID64_BASE = 76561197960265728
@@ -112,8 +115,10 @@ def load_appinfo(root):
     return apps
 
 
-def load_owned(root):
-    """App ids granted by the account's licenses. Package 0 is Steam's own."""
+def load_owned(root, licenses=None):
+    """App ids granted by the account's packages: every package cached in
+    packageinfo.vdf, or only those in licenses when they are known. Package 0
+    is Steam's own."""
     buf = read_file(os.path.join(root, "appcache/packageinfo.vdf"), MAX_BINARY)
     owned = set()
     if not buf or len(buf) < 8:
@@ -129,7 +134,7 @@ def load_owned(root):
                 break
             pos += 4 + 20 + 4 + (8 if magic == 0x06565528 else 0)
             kv, pos = parse_binary_kv(buf, pos)
-            if package == 0:
+            if package == 0 or (licenses is not None and package not in licenses):
                 continue
             body = kv.get(str(package), kv)
             for value in (child(body, "appids") or {}).values():
@@ -137,6 +142,131 @@ def load_owned(root):
     except (ValueError, IndexError, struct.error):
         pass
     return owned
+
+
+# ---- Licenses ------------------------------------------------------------------
+
+# packageinfo.vdf caches every package the client ever looked at, refunded
+# ones included, so on its own it lists games the account no longer has. The
+# client's license cache holds the real list: a CMsgClientLicenseList protobuf,
+# XORed byte by byte with Valve's CUniformRandomStream (ran1 from Numerical
+# Recipes, as in the Source SDK) seeded with the account id, one
+# RandomInt(32, 126) per byte, and closed by the CRC32 of the rest. The format
+# is undocumented, so anything unexpected falls back to packageinfo.vdf alone.
+MAX_LICENSES = 16 * 1024 * 1024
+LICENSE_GONE = 0x08 | 0x10 | 0x20   # ELicenseFlags Expired, CancelledByUser, CancelledByAdmin
+
+
+class UniformRandomStream:
+    IA, IM, IQ, IR, NTAB = 16807, 2147483647, 127773, 2836, 32
+    NDIV = 1 + (IM - 1) // NTAB
+    MAX_RANDOM = 0x7FFFFFFF
+
+    def __init__(self, seed):
+        self.idum = seed if seed < 0 else -seed
+        self.iy = 0
+        self.iv = [0] * self.NTAB
+
+    def _step(self):
+        k = self.idum // self.IQ
+        self.idum = self.IA * (self.idum - k * self.IQ) - self.IR * k
+        if self.idum < 0:
+            self.idum += self.IM
+
+    def generate(self):
+        if self.idum <= 0 or not self.iy:
+            self.idum = 1 if -self.idum < 1 else -self.idum
+            for j in range(self.NTAB + 7, -1, -1):
+                self._step()
+                if j < self.NTAB:
+                    self.iv[j] = self.idum
+            self.iy = self.iv[0]
+        self._step()
+        j = self.iy // self.NDIV
+        self.iy = self.iv[j]
+        self.iv[j] = self.idum
+        return self.iy
+
+    def random_int(self, low, high):
+        span = high - low + 1
+        limit = self.MAX_RANDOM - ((self.MAX_RANDOM + 1) % span)
+        while True:
+            value = self.generate()
+            if value <= limit:
+                return low + value % span
+
+
+def read_varint(buf, pos):
+    value = shift = 0
+    while True:
+        byte = buf[pos]
+        pos += 1
+        value |= (byte & 0x7F) << shift
+        if byte < 0x80:
+            return value, pos
+        shift += 7
+        if shift > 63:
+            raise ValueError("varint too long")
+
+
+def protobuf_fields(buf):
+    """(field, wire type, value) for each field of one protobuf message:
+    numbers as ints, length-delimited fields as bytes."""
+    pos = 0
+    while pos < len(buf):
+        key, pos = read_varint(buf, pos)
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            value, pos = read_varint(buf, pos)
+        elif wire == 1:
+            (value,) = struct.unpack_from("<Q", buf, pos)
+            pos += 8
+        elif wire == 5:
+            (value,) = struct.unpack_from("<I", buf, pos)
+            pos += 4
+        elif wire == 2:
+            size, pos = read_varint(buf, pos)
+            if pos + size > len(buf):
+                raise ValueError("truncated field")
+            value, pos = buf[pos:pos + size], pos + size
+        else:
+            raise ValueError("wire type %d" % wire)
+        yield field, wire, value
+
+
+def load_licenses(root, user):
+    """Package ids the account holds a live license for, from
+    userdata/<user>/config/licensecache, or None when that cannot be read for
+    certain (and every cached package counts, as before)."""
+    if not user or not user.isdigit():
+        return None
+    data = read_file(os.path.join(root, "userdata", user, "config/licensecache"), MAX_LICENSES)
+    if not data or len(data) < 5:
+        return None
+    stream = UniformRandomStream(int(user))
+    plain = bytes(byte ^ stream.random_int(32, 126) for byte in data)
+    body, (crc,) = plain[:-4], struct.unpack("<I", plain[-4:])
+    if zlib.crc32(body) != crc:
+        return None
+    packages, found = set(), 0
+    try:
+        for field, wire, value in protobuf_fields(body):
+            if field != 2 or wire != 2:
+                continue
+            package, flags = None, 0
+            for inner, inner_wire, item in protobuf_fields(value):
+                if inner == 1 and inner_wire == 0:
+                    package = item
+                elif inner == 7 and inner_wire == 0:
+                    flags = item
+            if package is None:
+                continue
+            found += 1
+            if not flags & LICENSE_GONE:
+                packages.add(package)
+    except (ValueError, IndexError, struct.error):
+        return None
+    return packages if found else None
 
 
 # ---- Everything else ----------------------------------------------------------
@@ -213,7 +343,8 @@ def main():
 
     libs = libraries(root)
     appinfo = load_appinfo(root)
-    owned = load_owned(root)
+    user = current_user(root)
+    owned = load_owned(root, load_licenses(root, user))
 
     def kind(appid):
         return str(child(appinfo.get(appid, {}), "type")).lower()
@@ -237,7 +368,6 @@ def main():
             lib["used"] = lib.get("used", 0) + installed[appid]["size"]
 
     played = {}
-    user = current_user(root)
     if user:
         localconfig = load_text_vdf(os.path.join(root, "userdata", user, "config/localconfig.vdf"))
         apps = child(localconfig, "UserLocalConfigStore", "Software", "Valve", "Steam", "apps")
