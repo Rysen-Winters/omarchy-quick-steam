@@ -75,6 +75,7 @@ BarWidget {
   readonly property bool showLibrary: service ? service.showLibrary : true
   readonly property bool showActivity: service ? service.showActivity : true
   readonly property bool showDetails: service ? service.showDetails : true
+  readonly property bool showHidden: service ? service.showHidden : false
 
   // Chosen on the panel's settings page and kept in this widget's entry in
   // shell.json. The shell replaces the whole entry, so the current settings go

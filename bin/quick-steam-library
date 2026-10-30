@@ -14,6 +14,9 @@ Steam root:
                                       rating and review score of every app
   userdata/<id>/config/localconfig.vdf
                                       last played and playtime per game
+  userdata/<id>/config/cloudstorage/cloud-storage-namespace-1.json
+                                      the games in the Hidden collection
+                                      (see load_hidden)
   config/config.vdf                   the compatibility tool (Proton) per game
   appcache/librarycache/<appid>/      cover art Steam already downloaded
   registry.vdf                        the game running right now
@@ -269,6 +272,49 @@ def load_licenses(root, user):
     return packages if found else None
 
 
+# ---- Hidden games ----------------------------------------------------------------
+
+MAX_COLLECTIONS = 16 * 1024 * 1024
+
+
+def collection_ids(values):
+    if not isinstance(values, list):
+        return set()
+    return {str(v) for v in values
+            if isinstance(v, (int, str)) and not isinstance(v, bool) and APPID.match(str(v))}
+
+
+def load_hidden(root, user):
+    """App ids in the account's Hidden collection, or an empty set when it
+    cannot be read (and nothing is hidden, as before).
+
+    Steam keeps the library collections in
+    userdata/<user>/config/cloudstorage/cloud-storage-namespace-1.json, a list
+    of [key, entry] pairs. The entry for "user-collections.hidden" holds the
+    collection as JSON in its "value": {"id": "hidden", "added": [appid, ...],
+    "removed": [appid, ...]}."""
+    if not user or not user.isdigit():
+        return set()
+    path = os.path.join(root, "userdata", user, "config/cloudstorage/cloud-storage-namespace-1.json")
+    data = read_file(path, MAX_COLLECTIONS)
+    if not data:
+        return set()
+    try:
+        for pair in json.loads(data):
+            if not isinstance(pair, list) or len(pair) != 2 or pair[0] != "user-collections.hidden":
+                continue
+            entry = pair[1]
+            if not isinstance(entry, dict) or entry.get("is_deleted") or not isinstance(entry.get("value"), str):
+                return set()
+            collection = json.loads(entry["value"])
+            if not isinstance(collection, dict):
+                return set()
+            return collection_ids(collection.get("added")) - collection_ids(collection.get("removed"))
+    except (ValueError, TypeError, RecursionError):
+        return set()
+    return set()
+
+
 # ---- Everything else ----------------------------------------------------------
 
 def current_user(root):
@@ -345,6 +391,7 @@ def main():
     appinfo = load_appinfo(root)
     user = current_user(root)
     owned = load_owned(root, load_licenses(root, user))
+    hidden = load_hidden(root, user)
 
     def kind(appid):
         return str(child(appinfo.get(appid, {}), "type")).lower()
@@ -401,6 +448,7 @@ def main():
             "id": str(appid),
             "name": name,
             "installed": local is not None,
+            "hidden": str(appid) in hidden,
             "library": local["library"] if local else -1,
             "size": local["size"] if local else 0,
             "state": local["state"] if local else 0,

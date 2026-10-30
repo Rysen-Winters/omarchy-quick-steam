@@ -28,7 +28,9 @@ Panel {
 
   readonly property string lang: host ? host.lang : "en"
   readonly property var library: host ? host.library : ({ games: [], libraries: [] })
-  readonly property var games: library.games || []
+  // Games hidden in Steam stay out of the list, the search and the counts
+  // unless the settings bring them back.
+  readonly property var games: (library.games || []).filter(function(g) { return showHidden || !g.hidden })
   readonly property var downloads: host ? host.downloads : []
   readonly property var shaders: host ? host.shaders : null
   readonly property string runningId: host ? host.runningId : (library.running || "")
@@ -37,6 +39,7 @@ Panel {
   readonly property bool showActivity: host ? host.showActivity : true
   readonly property bool showLibrary: host ? host.showLibrary : true
   readonly property bool showDetails: host ? host.showDetails : true
+  readonly property bool showHidden: host ? host.showHidden : false
   property bool settingsOpen: false
 
   // Only there while the list is on.
@@ -596,6 +599,15 @@ Panel {
                 lockedHelp: root.t("needsList")
                 onClicked: root.host.setSetting("showDetails", !root.showDetails)
               }
+
+              SettingToggle {
+                label: root.t("settingHidden")
+                help: root.t("settingHiddenHelp")
+                checked: root.showHidden
+                locked: !root.showLibrary
+                lockedHelp: root.t("needsList")
+                onClicked: root.host.setSetting("showHidden", !root.showHidden)
+              }
             }
 
             Column {
@@ -1053,6 +1065,10 @@ Panel {
           Flow {
             width: parent.width
             spacing: Style.space(6)
+
+            Badge {
+              label: root.selected && root.selected.hidden ? root.t("hiddenBadge") : ""
+            }
 
             Badge {
               readonly property var proton: root.selectedDetails ? root.selectedDetails.protondb : null

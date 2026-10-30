@@ -24,6 +24,8 @@ game and the free space left on every Steam library.
   - installed and not installed games, read from your Steam licences, so
     games Steam has never downloaded are listed too, while refunded games
     and expired free weekends are left out;
+  - games you hid in Steam stay out of the list and the search, as they do
+    in Steam's library, unless you turn on "Hidden games" in the settings;
   - search, and sorting by recent, name or size;
   - covers.
 - **Details** of the selected game:
@@ -42,6 +44,7 @@ game and the free space left on every Steam library.
 - **Settings page** (the gear, or `C`):
   - language;
   - which sections to show;
+  - hidden games;
   - progress in the bar;
   - each kind of notification.
 - **Languages:** English and Spanish, following the system language unless
@@ -110,6 +113,7 @@ The settings page writes them to the widget's entry in
 | `showActivity` | `true` | Downloads, Workshop and shaders in the panel |
 | `showLibrary` | `true` | The game list. Activity or the list always stays on |
 | `showDetails` | `true` | The details next to the list. Without them the panel is narrower and each row gets its own button |
+| `showHidden` | `false` | The games you hid in Steam, in the list and marked Hidden |
 | `showProgress` | `true` | Percentage and progress line in the bar |
 | `notifyDownloads` | `true` | Notify finished installs, updates and Workshop downloads |
 | `notifyShaders` | `true` | Notify finished shader pre-caching |

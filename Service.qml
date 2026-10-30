@@ -61,6 +61,10 @@ Item {
   readonly property bool showLibrary: setting("showLibrary", true) !== false
   readonly property bool showActivity: setting("showActivity", true) !== false || !showLibrary
   readonly property bool showDetails: showLibrary && setting("showDetails", true) !== false
+  // Games hidden in Steam stay out of the list, as they do in Steam's library.
+  readonly property bool showHidden: setting("showHidden", false) === true
+  // Their covers were skipped while they were out of the list.
+  onShowHiddenChanged: if (showHidden && claimed) refreshLibrary()
 
   // Descriptions come in the panel's language: a new one asks again (the
   // disk cache keeps one copy per language, so going back costs nothing).
@@ -85,7 +89,7 @@ Item {
     next.loading = false
     library = next
     // Covers are only drawn by the game list.
-    var missing = showLibrary ? (next.games || []).filter(function(g) { return !g.art }) : []
+    var missing = showLibrary ? (next.games || []).filter(function(g) { return !g.art && (showHidden || !g.hidden) }) : []
     missing.sort(function(a, b) { return (b.installed - a.installed) || (b.lastPlayed - a.lastPlayed) })
     for (var i = 0; i < Math.min(missing.length, 60); i++) requestCover(missing[i])
     if (runningId) requestHeader(game(runningId))
