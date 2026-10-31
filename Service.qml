@@ -73,6 +73,17 @@ Item {
     jobs = jobs.filter(function(j) { return j.kind !== "details" })
   }
 
+  // The plugin's version, read from its manifest so it is only written there.
+  // The settings page shows it.
+  property string version: ""
+
+  FileView {
+    path: root.pluginDir + "/manifest.json"
+    onLoaded: {
+      try { root.version = String(JSON.parse(text()).version || "") } catch (e) {}
+    }
+  }
+
   // ---- Library ------------------------------------------------------------------
 
   property var library: ({ ok: false, loading: true, games: [], libraries: [], running: "" })

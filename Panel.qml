@@ -735,6 +735,17 @@ Panel {
               }
             }
           }
+
+          // Which Quick Steam this is, from its manifest.
+          Text {
+            visible: text !== ""
+            width: parent.width
+            textFormat: Text.PlainText
+            text: root.host && root.host.version ? root.t("version", root.host.version) : ""
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
         }
 
         // What Steam is doing and the library: the panel's usual page.

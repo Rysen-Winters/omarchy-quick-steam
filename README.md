@@ -50,7 +50,8 @@ game and the free space left on every Steam library.
   - which sections to show;
   - hidden games;
   - progress in the bar;
-  - each kind of notification.
+  - each kind of notification;
+  - and, at the bottom, the plugin's version.
 - **Languages:** English and Spanish, following the system language unless
   you pick one.
 

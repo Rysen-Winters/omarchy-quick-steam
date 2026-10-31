@@ -130,6 +130,7 @@ var table = {
     settingNotifyShaders: "Notify finished shaders",
     settingNotifyShadersHelp: "When Steam empties its shader queue after more than a minute in the background.",
     settingsHints: "C or Esc goes back · Tab moves between options · Space changes",
+    version: "Version %1",
     nothingHappening: "Steam is not downloading or compiling shaders."
   },
   es: {
@@ -252,6 +253,7 @@ var table = {
     settingNotifyShaders: "Avisar shaders terminados",
     settingNotifyShadersHelp: "Cuando Steam vacía su cola de shaders después de más de un minuto en segundo plano.",
     settingsHints: "C o Esc vuelve · Tab recorre las opciones · Espacio cambia",
+    version: "Versión %1",
     nothingHappening: "Steam no está descargando ni compilando shaders."
   }
 }
