@@ -138,12 +138,21 @@ BarWidget {
     if (service && service.play(id)) close()
   }
 
-  function install(id) {
-    if (service) service.install(id)
+  // Whether the panel can pick the library and confirm uninstalls itself, and
+  // the library it installed to last.
+  readonly property bool directActions: service ? service.directActions : false
+  readonly property int lastFolder: service ? service.lastFolder : -1
+
+  // Steam takes the focus either way, with its dialog or by bringing its
+  // window forward with the command.
+  function install(id, folder) {
+    if (service) service.install(id, folder)
+    close()
   }
 
-  function uninstall(id) {
-    if (service) service.uninstall(id)
+  function uninstall(id, confirmed) {
+    if (service) service.uninstall(id, confirmed)
+    close()
   }
 
   function openStore(id) {

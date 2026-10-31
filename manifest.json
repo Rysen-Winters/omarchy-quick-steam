@@ -75,7 +75,7 @@
         "key": "notifyDownloads",
         "type": "boolean",
         "label": "Notify finished downloads",
-        "description": "Send a notification when a game finishes installing or updating.",
+        "description": "Send a notification when a game installed from the panel starts downloading, a game finishes installing or updating, or one uninstalled from the panel is gone.",
         "defaultValue": true
       },
       {

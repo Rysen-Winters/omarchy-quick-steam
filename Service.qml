@@ -94,11 +94,19 @@ Item {
     for (var i = 0; i < Math.min(missing.length, 60); i++) requestCover(missing[i])
     if (runningId) requestHeader(game(runningId))
     announceFinishedDownloads()
+    announceUninstalls()
   }
 
   function game(id) {
     var games = library.games || []
     for (var i = 0; i < games.length; i++) if (games[i].id === id) return games[i]
+    return null
+  }
+
+  // A library by its index in libraryfolders.vdf, the one Steam's commands take.
+  function libraryByFolder(folder) {
+    var libs = library.libraries || []
+    for (var i = 0; i < libs.length; i++) if (libs[i].folder === folder) return libs[i]
     return null
   }
 
@@ -203,7 +211,72 @@ Item {
     for (var j = 0; j < list.length; j++)
       if (list[j].status === "downloading") running[downloadKey(list[j])] = list[j]
     runningDownloads = running
+    announceStartedInstalls(list)
     if (changed) refreshLibrary()
+  }
+
+  // Installs sent from the panel, until Steam lists the download (queued or
+  // not): then a notification says it started, and where. One Steam never
+  // gets to is forgotten after a few minutes.
+  property var requestedInstalls: ({})
+
+  function announceStartedInstalls(list) {
+    var requested = requestedInstalls
+    var changed = false
+    for (var i = 0; i < list.length; i++) {
+      var request = requested[list[i].id]
+      if (!request || list[i].kind === "workshop") continue
+      delete requested[list[i].id]
+      changed = true
+      if (Date.now() - request.at > 300000 || !setting("notifyDownloads", true)) continue
+      notify(Strings.text(lang, "installStartedTitle"),
+        Strings.text(lang, "installStartedBody", request.name || list[i].name, request.label))
+    }
+    if (changed) requestedInstalls = Object.assign({}, requested)
+  }
+
+  // Uninstalls sent from the panel. Nothing downloads, so the watcher has
+  // nothing to say: the library is read again every two seconds until the
+  // game shows as not installed. Steam takes a few seconds to start when it
+  // was closed, so it gets half a minute. A game still there by then is most
+  // likely one uninstalled while it downloaded: Steam cancels the download,
+  // deletes the files and says it is done, but sometimes writes the manifest
+  // back as a paused install, which it ignores until it restarts. That gets a
+  // notification of its own.
+  property var requestedUninstalls: ({})
+
+  function announceUninstalls() {
+    var requested = requestedUninstalls
+    var changed = false
+    for (var id in requested) {
+      var current = game(id)
+      if (current && current.installed) continue
+      var request = requested[id]
+      delete requested[id]
+      changed = true
+      if (!setting("notifyDownloads", true)) continue
+      notify(Strings.text(lang, "uninstallDoneTitle"), request.size > 0
+        ? Strings.text(lang, "uninstallDoneBody", request.name, Strings.size(lang, request.size), request.label)
+        : Strings.text(lang, "uninstallDoneBodyNoSize", request.name, request.label))
+    }
+    if (changed) requestedUninstalls = Object.assign({}, requested)
+  }
+
+  Timer {
+    interval: 2000
+    repeat: true
+    running: Object.keys(root.requestedUninstalls).length > 0
+    onTriggered: {
+      var requested = root.requestedUninstalls
+      for (var id in requested) {
+        if (++requested[id].tries <= 15) continue
+        if (root.setting("notifyDownloads", true))
+          root.notify(Strings.text(root.lang, "uninstallStuckTitle"), Strings.text(root.lang, "uninstallStuckBody", requested[id].name))
+        delete requested[id]
+      }
+      root.requestedUninstalls = Object.assign({}, requested)
+      root.refreshLibrary()
+    }
   }
 
   function announceWorkshop(item) {
@@ -392,19 +465,65 @@ Item {
       "quick-steam", url])
   }
 
+  // Installs and uninstalls the panel has already asked about go to Steam as
+  // console commands on the steam launcher's command line. The launcher hands
+  // them to the running client through ~/.steam/steam.pipe, which only this
+  // user can write to, or starts Steam with them, -silent keeping its window
+  // closed. Unlike steam://install and steam://uninstall, they ask nothing.
+  // Steam does bring its window forward when it was already running. Through
+  // uwsm-app for the same reason as openSteam: this may be what starts Steam.
+  readonly property bool directActions: library.launcher === true
+
+  function runSteam(args) {
+    Quickshell.execDetached(["sh", "-c",
+      'if command -v uwsm-app >/dev/null; then exec uwsm-app -- steam -silent "$@"; else exec steam -silent "$@"; fi',
+      "quick-steam"].concat(args))
+  }
+
   function play(id) {
     if (!validId(id)) return false
     openSteam("steam://rungameid/" + id)
     return true
   }
 
-  function install(id) {
-    if (validId(id)) openSteam("steam://install/" + id)
+  // The library the panel installed to last, offered first next time.
+  property int lastFolder: -1
+
+  // folder is the library's index in libraryfolders.vdf, picked in the panel.
+  // Without it, or without the launcher, Steam's own dialog asks where.
+  function install(id, folder) {
+    if (!validId(id)) return
+    var target = /^[0-9]{1,3}$/.test(String(folder)) ? libraryByFolder(Number(folder)) : null
+    if (!directActions || !target) {
+      openSteam("steam://install/" + id)
+      return
+    }
+    var current = game(id)
+    var requested = Object.assign({}, requestedInstalls)
+    requested[id] = { name: current ? current.name : "", label: target.label, at: Date.now() }
+    requestedInstalls = requested
+    lastFolder = target.folder
+    runSteam(["+app_install", id, String(target.folder)])
   }
 
-  // Steam asks for confirmation itself.
-  function uninstall(id) {
-    if (validId(id)) openSteam("steam://uninstall/" + id)
+  // confirmed: the panel asked first. Otherwise Steam asks itself.
+  function uninstall(id, confirmed) {
+    if (!validId(id)) return
+    if (!directActions || confirmed !== true) {
+      openSteam("steam://uninstall/" + id)
+      return
+    }
+    var current = game(id)
+    var libs = library.libraries || []
+    var requested = Object.assign({}, requestedUninstalls)
+    requested[id] = {
+      name: current ? current.name : "",
+      size: current ? current.size : 0,
+      label: current && current.library >= 0 && current.library < libs.length ? libs[current.library].label : "Steam",
+      tries: 0
+    }
+    requestedUninstalls = requested
+    runSteam(["+app_uninstall", id])
   }
 
   function openStore(id) {

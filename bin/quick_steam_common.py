@@ -94,13 +94,17 @@ def as_int(value, default=0):
 # ---- Library folders -----------------------------------------------------------
 
 def libraries(root):
-    """Every Steam library folder, the Steam root first, with a short label and
-    the free and total space of the disk it lives on."""
+    """Every Steam library folder, the Steam root first, with a short label,
+    its index in libraryfolders.vdf (the volume index Steam's app_install
+    takes, -1 when the file does not list it) and the free and total space of
+    the disk it lives on."""
     found, seen = [], set()
     folders = load_text_vdf(os.path.join(root, "steamapps/libraryfolders.vdf"))
     entries = child(folders, "libraryfolders") or folders
     paths = [root] + [child(entry, "path") for entry in entries.values() if isinstance(entry, dict)]
     labels = {child(e, "path"): child(e, "label") for e in entries.values() if isinstance(e, dict)}
+    indexes = {os.path.realpath(child(e, "path")): int(key) for key, e in entries.items()
+               if isinstance(e, dict) and isinstance(child(e, "path"), str) and child(e, "path") and key.isdigit()}
     for path in paths:
         if not isinstance(path, str) or not path:
             continue
@@ -119,5 +123,6 @@ def libraries(root):
             free, total = stats.f_bavail * stats.f_frsize, stats.f_blocks * stats.f_frsize
         except OSError:
             free = total = 0
-        found.append({"path": real, "label": label, "free": free, "total": total})
+        folder = indexes.get(real, 0 if real == root else -1)
+        found.append({"path": real, "label": label, "folder": folder, "free": free, "total": total})
     return found

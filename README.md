@@ -35,8 +35,12 @@ game and the free space left on every Steam library.
   - playtime and when you last played;
   - the store description.
 - **Free space** on every Steam library, at the bottom of the panel.
+- **Install and uninstall without Steam's dialogs:** you pick the library
+  in the panel, in the free space row, and confirm uninstalls there too.
 - **Notifications:**
+  - a game installed from the panel started downloading, and where;
   - a game finished installing ("Ready to play") or updating;
+  - a game uninstalled from the panel is gone, and how much space it freed;
   - a game's Workshop items finished downloading;
   - Steam finished pre-compiling shaders after more than a minute in the
     background.
@@ -92,7 +96,9 @@ one only works where its button would be.
 |---|---|
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | Move through the list |
 | `Enter` | Play the selected game, or install it |
-| `P` / `I` / `U` | Play / install / uninstall (Steam asks first) |
+| `P` | Play |
+| `I` | Install: pick the library with `←` `→`, `Enter` installs, `Esc` or `N` cancels. With a single library it installs right away |
+| `U` | Uninstall: `Y` confirms, `Esc` or `N` cancels |
 | `S` | Open the game's store page |
 | `L` | Open the Steam library |
 | `B` | Open Big Picture |
@@ -115,7 +121,7 @@ The settings page writes them to the widget's entry in
 | `showDetails` | `true` | The details next to the list. Without them the panel is narrower and each row gets its own button |
 | `showHidden` | `false` | The games you hid in Steam, in the list and marked Hidden |
 | `showProgress` | `true` | Percentage and progress line in the bar |
-| `notifyDownloads` | `true` | Notify finished installs, updates and Workshop downloads |
+| `notifyDownloads` | `true` | Notify installs and uninstalls from the panel, and finished installs, updates and Workshop downloads |
 | `notifyShaders` | `true` | Notify finished shader pre-caching |
 
 ## How it works
@@ -127,7 +133,12 @@ Quick Steam only reads Steam's own files and never writes to them:
 - the library folders.
 
 Everything it does in Steam goes through `steam://` links, the same ones a
-browser would use.
+browser would use, except installing and uninstalling. Those links make Steam
+ask where to install and whether to uninstall, so instead the panel asks, and
+then hands Steam its own console commands (`app_install <game> <library>`,
+`app_uninstall <game>`) on the `steam` command line. The launcher passes them
+to the running Steam through `~/.steam/steam.pipe`, which only you can write
+to, or starts Steam with them. No debugging port or anything else is opened.
 
 - **One small background process** watches Steam. Every 2 seconds it compares
   the modification times of a few files. It only reads them, and only prints
@@ -149,6 +160,17 @@ browser would use.
 
 ## Known limits
 
+- **Steam comes forward on install and uninstall:** when Steam is running,
+  every command it gets opens its window (even if it was closed to the tray)
+  and takes the focus, so the panel closes. When Steam was closed, it starts
+  without a window.
+- **Flatpak Steam:** the commands need the native `steam` launcher, so with
+  the Flatpak installing and uninstalling still go through Steam's dialogs.
+- **Uninstalling a game while it downloads:** Steam cancels the download,
+  deletes the files and reports the game uninstalled, but sometimes writes
+  its manifest back as a paused install. The list keeps showing it as queued
+  until Steam restarts and it is uninstalled again. Quick Steam notifies when
+  a game is still there half a minute after uninstalling it.
 - **Paused downloads:** Steam has no link that resumes one. "Resume in Steam"
   opens Steam's Downloads page instead.
 - **Progress:** Steam doesn't update its files while it downloads, so the

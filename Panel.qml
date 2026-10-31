@@ -12,7 +12,8 @@ import "Model.js" as Model
 //
 // Keyboard, the way the Spotify panel does it: the list has the keys when the
 // panel opens, so plain letters are shortcuts (p play, i install, u uninstall,
-// s store, l library, b Big Picture, f cycles the order), Up and Down move,
+// s store, l library, b Big Picture, f cycles the order). Installing asks for
+// the library and uninstalling for a y, both in the panel. Up and Down move,
 // Enter plays or installs, Tab switches between installed and not installed,
 // and Escape clears the search, then closes. "/" or Up on the first game go to
 // the search field, where Enter plays the selected match and Down or Escape
@@ -59,12 +60,84 @@ Panel {
   readonly property var selected: selectedIndex >= 0 ? visibleGames[selectedIndex] : null
   readonly property var selectedDetails: selected && host ? host.details[selected.id] : undefined
 
+  // An install or uninstall waiting for an answer in the panel: which library
+  // to install to (choice, an index in library.libraries, shown in the free
+  // space row) or a yes to uninstall. Only when Steam takes them without its
+  // own dialogs (host.directActions). Moving to another game, the other tab
+  // or the settings, or closing the panel, drops it.
+  property var pending: null
+
+  function isPending(kind, game) {
+    return !!pending && !!game && pending.kind === kind && pending.id === game.id
+  }
+
+  // The selection is pinned to the game asked about. Left unset it is just
+  // the first row, and a fresh read of the library can put another game
+  // there, which would cancel the question; pressing u again would then ask
+  // about that other game.
+  function ask(action) {
+    selectedId = action.id
+    pending = action
+    focusList()
+  }
+
+  // With one library there is nothing to ask. The last one used comes first,
+  // or else the one with the most room.
+  function requestInstall(game) {
+    if (!game || !host) return
+    var libs = library.libraries || []
+    if (!host.directActions || libs.length === 0) host.install(game.id)
+    else if (libs.length === 1) host.install(game.id, libs[0].folder)
+    else {
+      var choice = 0
+      for (var i = 0; i < libs.length; i++) if (libs[i].free > libs[choice].free) choice = i
+      for (var j = 0; j < libs.length; j++) if (libs[j].folder === host.lastFolder) choice = j
+      ask({ kind: "install", id: game.id, name: game.name, choice: choice })
+    }
+  }
+
+  function requestUninstall(game) {
+    if (!game || !host) return
+    if (!host.directActions) host.uninstall(game.id)
+    else ask({ kind: "uninstall", id: game.id, name: game.name })
+  }
+
+  function movePendingChoice(delta) {
+    var libs = library.libraries || []
+    if (!pending || pending.kind !== "install" || libs.length === 0) return
+    pending = Object.assign({}, pending, { choice: Math.max(0, Math.min(libs.length - 1, pending.choice + delta)) })
+  }
+
+  // choice: a library clicked in the free space row, instead of the one marked.
+  function confirmPending(choice) {
+    var action = pending
+    pending = null
+    if (!action || !host) return
+    if (action.kind === "uninstall") {
+      host.uninstall(action.id, true)
+      return
+    }
+    var libs = library.libraries || []
+    var index = choice === undefined ? action.choice : choice
+    if (index >= 0 && index < libs.length) host.install(action.id, libs[index].folder)
+  }
+
+  function pendingPrompt() {
+    if (!pending) return ""
+    return pending.kind === "uninstall" ? t("uninstallPrompt", pending.name) : t("installPrompt", pending.name)
+  }
+
   readonly property string fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
   readonly property color foreground: root.barForeground
   readonly property color dim: Qt.darker(foreground, 1.4)
   readonly property int listHeight: Style.space(360)
 
-  onSelectedChanged: if (selected && host && opened) host.requestDetails(selected.id)
+  onSelectedChanged: {
+    // A fresh read of the library hands over a new object for the same game.
+    if (pending && (!selected || selected.id !== pending.id)) pending = null
+    if (selected && host && opened) host.requestDetails(selected.id)
+  }
+  onOpenedChanged: if (!opened) pending = null
   onShowDetailsChanged: if (showDetails && selected && host && opened) host.requestDetails(selected.id)
   // The bar widget drops the details in the old language first.
   onLangChanged: Qt.callLater(function() {
@@ -81,6 +154,7 @@ Panel {
     query = ""
     if (searchInput) searchInput.text = ""
     settingsOpen = false
+    pending = null
     keyCatcher.forceActiveFocus()
     // Opened while playing: straight to the game being played.
     if (runningId) installedTab = true
@@ -118,15 +192,18 @@ Panel {
 
   // A game that is still downloading has nothing to play yet; its button
   // leads to Steam's Downloads page, where a paused download is resumed.
+  // While the library is being picked, it installs to the one marked.
   function primaryAction(game) {
     if (!game || !host) return
-    if (Model.isReady(game)) host.play(game.id)
-    else if (!game.installed) host.install(game.id)
+    if (isPending("install", game)) confirmPending()
+    else if (Model.isReady(game)) host.play(game.id)
+    else if (!game.installed) requestInstall(game)
     else host.openDownloads()
   }
 
   function primaryLabel(game) {
     if (!game) return ""
+    if (isPending("install", game)) return t("installTo", libraryLabel(pending.choice))
     if (game.id === runningId) return t("playing")
     if (Model.isReady(game)) return t("play")
     if (!game.installed) return t("install")
@@ -166,6 +243,7 @@ Panel {
   // on the page; Tab walks its controls.
   function toggleSettings() {
     settingsOpen = !settingsOpen
+    pending = null
     focusList()
   }
 
@@ -195,8 +273,8 @@ Panel {
     else if (!showLibrary) return false
     else if (letter === "/") focusSearch(true)
     else if (letter === "p") { if (game && Model.isReady(game) && game.id !== runningId) host.play(game.id) }
-    else if (letter === "i") { if (game && !game.installed) host.install(game.id) }
-    else if (letter === "u") { if (game && game.installed) host.uninstall(game.id) }
+    else if (letter === "i") { if (game && !game.installed) requestInstall(game) }
+    else if (letter === "u") { if (game && game.installed) requestUninstall(game) }
     else if (letter === "s") { if (game) host.openStore(game.id) }
     else if (letter === "f") cycleSort()
     else return false
@@ -214,6 +292,21 @@ Panel {
         toggleSettings()
         event.accepted = true
       }
+      return
+    }
+    // An install or uninstall waiting for an answer takes the keys until it
+    // gets one: the arrows pick the library, Enter or i installs, y
+    // uninstalls, n or Escape gives up. Combinations with Ctrl, Alt or Super
+    // still belong to the rest of the desktop.
+    if (pending) {
+      var answer = plain ? String(event.text || "").toLowerCase() : ""
+      var installing = pending.kind === "install"
+      if (key === Qt.Key_Escape || answer === "n") pending = null
+      else if (installing ? key === Qt.Key_Return || key === Qt.Key_Enter || answer === "i" : answer === "y") confirmPending()
+      else if (installing && (key === Qt.Key_Left || key === Qt.Key_Up)) movePendingChoice(-1)
+      else if (installing && (key === Qt.Key_Right || key === Qt.Key_Down)) movePendingChoice(1)
+      else if (!plain) return
+      event.accepted = true
       return
     }
     if (key === Qt.Key_Escape) {
@@ -744,14 +837,16 @@ Panel {
         }
 
         // The keys, so the shortcuts can be found without a manual. On the
-        // narrow panel they take two lines.
+        // narrow panel they take two lines. An install or uninstall waiting
+        // for an answer asks its question here instead.
         Text {
           width: parent.width
           textFormat: Text.PlainText
-          text: root.settingsOpen ? root.t("settingsHints") : root.keyHints()
-          color: root.dim
+          text: root.settingsOpen ? root.t("settingsHints") : root.pending ? root.pendingPrompt() : root.keyHints()
+          color: !root.pending ? root.dim : root.pending.kind === "uninstall" ? Color.urgent : Color.accent
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
+          font.bold: !!root.pending
           wrapMode: Text.WordWrap
         }
 
@@ -760,7 +855,9 @@ Panel {
           foreground: root.foreground
         }
 
-        // Free space in every Steam library.
+        // Free space in every Steam library. While an install waits for its
+        // library, this is where it is picked: the one marked takes the
+        // accent, and a click installs to any of them.
         Row {
           width: parent.width
           spacing: Style.space(16)
@@ -768,39 +865,62 @@ Panel {
           Repeater {
             model: root.library.libraries || []
 
-            Column {
+            Item {
+              id: libraryCell
               required property var modelData
+              required property int index
+              readonly property bool choosing: !!root.pending && root.pending.kind === "install"
+              readonly property bool chosen: choosing && root.pending.choice === index
+              readonly property color labelColor: chosen || libraryMouse.containsMouse ? Color.accent : root.dim
               width: (parent.width - parent.spacing * Math.max(0, (root.library.libraries || []).length - 1)) / Math.max(1, (root.library.libraries || []).length)
-              spacing: Style.space(4)
+              height: libraryColumn.implicitHeight
 
-              // Name and free space share a line on the wide panel and get one
-              // each on the narrow one, where they would not fit.
-              Text {
+              Column {
+                id: libraryColumn
                 width: parent.width
-                textFormat: Text.PlainText
-                text: parent.modelData.label + (root.showDetails ? " · " + root.t("freeShort", Strings.size(root.lang, parent.modelData.free)) : "")
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                elide: Text.ElideRight
+                spacing: Style.space(4)
+
+                // Name and free space share a line on the wide panel and get one
+                // each on the narrow one, where they would not fit.
+                Text {
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  text: libraryCell.modelData.label + (root.showDetails ? " · " + root.t("freeShort", Strings.size(root.lang, libraryCell.modelData.free)) : "")
+                  color: libraryCell.labelColor
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: libraryCell.chosen
+                  elide: Text.ElideRight
+                }
+
+                Text {
+                  visible: !root.showDetails
+                  width: parent.width
+                  textFormat: Text.PlainText
+                  text: root.t("freeShort", Strings.size(root.lang, libraryCell.modelData.free))
+                  color: libraryCell.labelColor
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: libraryCell.chosen
+                  elide: Text.ElideRight
+                }
+
+                ProgressLine {
+                  width: parent.width
+                  height: Style.space(4)
+                  value: libraryCell.modelData.total > 0 ? 100 * (libraryCell.modelData.total - libraryCell.modelData.free) / libraryCell.modelData.total : 0
+                  fill: libraryCell.chosen ? Color.accent
+                    : libraryCell.modelData.total > 0 && libraryCell.modelData.free / libraryCell.modelData.total < 0.1 ? Color.urgent : root.dim
+                }
               }
 
-              Text {
-                visible: !root.showDetails
-                width: parent.width
-                textFormat: Text.PlainText
-                text: root.t("freeShort", Strings.size(root.lang, parent.modelData.free))
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                elide: Text.ElideRight
-              }
-
-              ProgressLine {
-                width: parent.width
-                height: Style.space(4)
-                value: parent.modelData.total > 0 ? 100 * (parent.modelData.total - parent.modelData.free) / parent.modelData.total : 0
-                fill: parent.modelData.total > 0 && parent.modelData.free / parent.modelData.total < 0.1 ? Color.urgent : root.dim
+              MouseArea {
+                id: libraryMouse
+                anchors.fill: parent
+                enabled: libraryCell.choosing
+                hoverEnabled: libraryCell.choosing
+                cursorShape: libraryCell.choosing ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onClicked: root.confirmPending(libraryCell.index)
               }
             }
           }
@@ -1149,13 +1269,18 @@ Panel {
           onClicked: root.primaryAction(root.selected)
         }
 
+        // Asked about, it becomes the yes.
         Button {
+          readonly property bool asking: root.isPending("uninstall", root.selected)
           visible: !!root.selected && root.selected.installed
-          text: root.t("uninstall")
-          foreground: root.foreground
+          text: root.t(asking ? "confirmUninstall" : "uninstall")
+          foreground: asking ? Color.urgent : root.foreground
           fontFamily: root.fontFamily
           bordered: true
-          onClicked: if (root.host && root.selected) root.host.uninstall(root.selected.id)
+          onClicked: {
+            if (asking) root.confirmPending()
+            else root.requestUninstall(root.selected)
+          }
         }
 
         Button {

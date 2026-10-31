@@ -30,6 +30,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import struct
 import sys
 import zlib
@@ -381,6 +382,13 @@ def running_app():
     return value if isinstance(value, str) and APPID.match(value) and value != "0" else ""
 
 
+def launcher(root):
+    """Whether installs and uninstalls can go to Steam as console commands on
+    the steam launcher's command line (see Service.qml): the native client,
+    with its launcher on the PATH. The Flatpak keeps Steam's own dialogs."""
+    return "/.var/app/" not in root and shutil.which("steam") is not None
+
+
 def main():
     root = steam_root()
     if not root:
@@ -473,7 +481,8 @@ def main():
         "root": root,
         "running": running_app(),
         "defaultTool": default_tool,
-        "libraries": [{k: lib.get(k, 0) for k in ("path", "label", "free", "total", "games", "used")} for lib in libs],
+        "launcher": launcher(root),
+        "libraries": [{k: lib.get(k, 0) for k in ("path", "label", "folder", "free", "total", "games", "used")} for lib in libs],
         "games": games,
     }, ensure_ascii=False, separators=(",", ":")))
 
