@@ -3,6 +3,8 @@
 Your Steam library one key away, and what Steam is doing right now, in the
 Omarchy bar.
 
+![The Quick Steam panel open under the Omarchy bar, with the game list and the details of the selected game](preview.png)
+
 The bar shows the Steam icon. While Steam downloads a game, updates one,
 fetches Workshop items or pre-compiles shaders, the icon takes your theme's
 accent colour and shows the percentage. Open the panel and you get the whole
