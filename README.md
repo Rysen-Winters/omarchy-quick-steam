@@ -127,11 +127,33 @@ The settings page writes them to the widget's entry in
 
 ## How it works
 
-Quick Steam only reads Steam's own files and never writes to them:
-- the app manifests;
-- the logs;
-- `config.vdf`;
-- the library folders.
+Quick Steam only reads Steam's own files and never writes to them. Nothing it
+reads leaves your computer:
+- `libraryfolders.vdf`: your Steam library folders;
+- the app manifests: installed games, their size and download state;
+- `appinfo.vdf` and `packageinfo.vdf`, Steam's cache of store data: names,
+  genres, Steam Deck status, review scores and the games in each package;
+- `userdata/<account>/config/licensecache`: your account's licences, so
+  refunded games and expired free weekends stay out of the list. Steam keeps
+  this file scrambled, XORed with a pseudo-random stream seeded with your
+  account id. Quick Steam unscrambles it in memory and checks its CRC. It
+  keeps only each package id and whether its licence is still valid. If
+  anything looks off, it falls back to `packageinfo.vdf` alone;
+- `loginusers.vdf`: which account logged in last;
+- `localconfig.vdf`: playtime and when you last played each game;
+- `cloud-storage-namespace-1.json`: your library collections, read only to
+  find the Hidden one;
+- `config.vdf`: the Proton version of each game and the shader queue;
+- `content_log.txt` and `shader_log.txt`: downloads, Workshop items and
+  shader pre-caching;
+- `registry.vdf` and `/proc`: the game you are playing. In `/proc` it looks
+  at process names only, and reads the command line of just two: Steam's
+  `reaper`, which runs the game, and `fossilize_replay`, which compiles
+  shaders;
+- `appcache/librarycache`: the covers Steam has already downloaded.
+
+Besides its settings, Quick Steam writes only its own cache, in
+`~/.cache/quick-steam`.
 
 Everything it does in Steam goes through `steam://` links, the same ones a
 browser would use, except installing and uninstalling. Those links make Steam

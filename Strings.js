@@ -278,11 +278,16 @@ function language(localeName) {
   return table[code] ? code : "en"
 }
 
+// All placeholders in one pass, each argument inserted as it is: a game name
+// holding "%2" or "$&" is shown untouched instead of being read as one more
+// placeholder or as a replacement pattern.
 function text(lang, key) {
   var value = (table[lang] || table.en)[key] || table.en[key] || key
-  for (var i = 2; i < arguments.length; i++)
-    value = value.replace("%" + (i - 1), arguments[i])
-  return value
+  var args = arguments
+  return value.replace(/%([1-9])/g, function(placeholder, n) {
+    var index = Number(n) + 1
+    return index < args.length ? String(args[index]) : placeholder
+  })
 }
 
 function genreNames(lang, ids) {

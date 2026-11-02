@@ -340,8 +340,9 @@ Item {
       Strings.text(lang, "shadersDoneBody", Strings.games(lang, count), Strings.duration(lang, seconds)))
   }
 
+  // "--" so a game whose name starts with a dash is not read as an option.
   function notify(title, body) {
-    Quickshell.execDetached(["notify-send", "--app-name=Steam", "--icon=steam", title, body])
+    Quickshell.execDetached(["notify-send", "--app-name=Steam", "--icon=steam", "--", title, body])
   }
 
   // The game's own download; its Workshop items do not make it unplayable.

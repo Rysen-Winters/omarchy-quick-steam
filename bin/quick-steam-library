@@ -84,24 +84,27 @@ def parse_binary_kv(buf, pos, strings=None, depth=0):
 
 
 def load_appinfo(root):
-    """{appid: common section} from appinfo.vdf (format 0x07564429 / 0x07564428)."""
+    """{appid: common section} from appinfo.vdf (format 0x07564429 / 0x07564428).
+    A file Steam left truncated or half written reads as empty, so the library
+    still lists the installed games."""
     buf = read_file(os.path.join(root, "appcache/appinfo.vdf"), MAX_BINARY)
     if not buf or len(buf) < 16:
         return {}
     magic = struct.unpack_from("<I", buf, 0)[0]
     strings, pos = None, 8
-    if magic == 0x07564429:
-        (table,) = struct.unpack_from("<q", buf, 8)
-        (count,) = struct.unpack_from("<I", buf, table)
-        strings, cursor = [], table + 4
-        for _ in range(count):
-            value, cursor = read_cstring(buf, cursor)
-            strings.append(value)
-        pos = 16
-    elif magic != 0x07564428:
-        return {}
     apps = {}
     try:
+        # The string table every key points into sits at the end of the file.
+        if magic == 0x07564429:
+            (table,) = struct.unpack_from("<q", buf, 8)
+            (count,) = struct.unpack_from("<I", buf, table)
+            strings, cursor = [], table + 4
+            for _ in range(count):
+                value, cursor = read_cstring(buf, cursor)
+                strings.append(value)
+            pos = 16
+        elif magic != 0x07564428:
+            return {}
         while pos + 8 <= len(buf):
             appid, size = struct.unpack_from("<II", buf, pos)
             if appid == 0:
@@ -114,7 +117,7 @@ def load_appinfo(root):
             except (ValueError, IndexError, struct.error):
                 pass
             pos += 8 + size
-    except struct.error:
+    except (ValueError, IndexError, struct.error):
         pass
     return apps
 
