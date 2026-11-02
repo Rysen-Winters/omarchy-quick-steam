@@ -57,7 +57,7 @@ game and the free space left on every Steam library.
 
 ## Requirements
 
-- Omarchy with shell plugins (tested on 4.0.5).
+- Omarchy with shell plugins (tested on 4.0.6).
 - Steam, the native package. The Flatpak location is detected too, but it
   hasn't been tested.
 - `python3`, which Omarchy already has.
@@ -88,26 +88,97 @@ omarchy plugin update io.github.rysen-winters.quick-steam
 omarchy plugin remove io.github.rysen-winters.quick-steam
 ```
 
-## Keys
+## Keyboard shortcuts
 
-The panel opens with the game list focused, so letters are shortcuts. Each
-one only works where its button would be.
+Everything in the panel works from the keyboard. Letters are single keys,
+with no modifier. Combinations with Ctrl, Alt or Super are left to the rest
+of the desktop.
+
+### Opening the panel
+
+Omarchy has no default key for Quick Steam: add one as shown in
+[Install](#install). These commands also work in a binding or a script:
+
+| Command | What it does |
+|---|---|
+| `omarchy-shell shell toggle io.github.rysen-winters.quick-steam` | Open or close the panel |
+| `omarchy-shell quick-steam open` | Open the panel |
+| `omarchy-shell quick-steam close` | Close the panel |
+| `omarchy-shell quick-steam bigPicture` | Open Big Picture |
+
+### In the game list
+
+The panel opens with the list focused. If you are playing, the game you are
+playing is selected.
 
 | Key | Action |
 |---|---|
-| `↑` `↓` `PgUp` `PgDn` `Home` `End` | Move through the list |
-| `Enter` | Play the selected game, or install it |
+| `↑` `↓` | Move through the list. `↑` on the first game goes to the search field |
+| `PgUp` `PgDn` | Move 8 games at a time |
+| `Home` `End` | Go to the first or last game |
+| `Enter` | Press the game's main button: play it, install it, or open Steam's Downloads while it is still downloading |
 | `P` | Play |
-| `I` | Install: pick the library with `←` `→`, `Enter` installs, `Esc` or `N` cancels. With a single library it installs right away |
-| `U` | Uninstall: `Y` confirms, `Esc` or `N` cancels |
+| `I` | Install (see [Installing and uninstalling](#installing-and-uninstalling)) |
+| `U` | Uninstall (see [Installing and uninstalling](#installing-and-uninstalling)) |
 | `S` | Open the game's store page |
+| `Tab` | Switch between installed and not installed |
+| `F` | Change the order: recent, name, or size (size only for installed games) |
+| `/` | Go to the search field, with what you typed before selected |
 | `L` | Open the Steam library |
 | `B` | Open Big Picture |
-| `F` | Change the sort order |
-| `Tab` | Switch between installed and not installed |
-| `/` | Search (`↓` or `Esc` goes back to the list, keeping the filter) |
-| `C` | Settings |
+| `C` | Open the settings |
 | `Esc` | Clear the search, then close the panel |
+
+Each letter only works where its button would be. `P` needs a game that is
+ready to play, `I` one that is not installed, and `U` one that is.
+
+With the game list turned off in the settings, only `L`, `B`, `C` and `Esc`
+are left.
+
+### Installing and uninstalling
+
+`I` asks which library to install to, in the free space row at the bottom
+of the panel. With a single library it installs right away. `U` asks you
+to confirm. Until you answer, the other keys do nothing.
+
+| Key | Picking a library | Confirming an uninstall |
+|---|---|---|
+| `←` `→` (or `↑` `↓`) | Choose the library | — |
+| `Enter` or `I` | Install to the one marked | — |
+| `Y` | — | Uninstall |
+| `Esc` or `N` | Cancel | Cancel |
+
+With the mouse, click a library in the free space row, or the "Yes,
+uninstall" button. With Flatpak Steam, `I` and `U` open Steam's own
+dialogs instead.
+
+### In the search field
+
+| Key | Action |
+|---|---|
+| Typing | Filters the list. A game has to match every word, and accents are ignored |
+| `Enter` | Play or install the selected match |
+| `↓` or `Esc` | Go back to the list and keep the filter, so the letters work on the results |
+| `Tab` | Switch between installed and not installed |
+
+### On the settings page
+
+| Key | Action |
+|---|---|
+| `Tab` `Shift+Tab` | Move between the options |
+| `Space` or `Enter` | Switch the focused option |
+| `←` `→` | Choose a language, then `Space` or `Enter` to apply it |
+| `C` or `Esc` | Go back to the panel |
+
+### Mouse
+
+| Where | Action |
+|---|---|
+| Left click on the bar icon | Open or close the panel |
+| Middle click on the bar icon | Open Big Picture |
+| Right click on the bar icon | Open the Steam library |
+| Double click on a game | Play or install it |
+| Click on a download | Open Steam's Downloads |
 
 ## Settings
 
