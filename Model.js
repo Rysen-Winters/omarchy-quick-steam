@@ -16,24 +16,27 @@ function fold(value) {
 // The game Steam reports as running always comes first.
 function visibleGames(games, installedTab, query, sort, running) {
   var terms = fold(query).split(/\s+/).filter(function(t) { return t !== "" })
-  var list = (games || []).filter(function(game) {
-    if (game.installed !== installedTab) return false
-    var name = fold(game.name)
+  // Each name is folded once here, not on every comparison of the sort.
+  var entries = (games || []).filter(function(game) {
+    return game.installed === installedTab
+  }).map(function(game) {
+    return { game: game, name: fold(game.name) }
+  }).filter(function(entry) {
     for (var i = 0; i < terms.length; i++)
-      if (name.indexOf(terms[i]) < 0) return false
+      if (entry.name.indexOf(terms[i]) < 0) return false
     return true
   })
-  var byName = function(a, b) { return fold(a.name) < fold(b.name) ? -1 : fold(a.name) > fold(b.name) ? 1 : 0 }
-  list.sort(function(a, b) {
+  entries.sort(function(x, y) {
+    var a = x.game, b = y.game
     if (running) {
       if (a.id === running && b.id !== running) return -1
       if (b.id === running && a.id !== running) return 1
     }
     if (sort === "size" && installedTab && b.size !== a.size) return b.size - a.size
     if (sort === "recent" && b.lastPlayed !== a.lastPlayed) return b.lastPlayed - a.lastPlayed
-    return byName(a, b)
+    return x.name < y.name ? -1 : x.name > y.name ? 1 : 0
   })
-  return list
+  return entries.map(function(entry) { return entry.game })
 }
 
 function count(games, installedTab) {

@@ -90,6 +90,21 @@ omarchy plugin update io.github.rysen-winters.quick-steam
 omarchy plugin remove io.github.rysen-winters.quick-steam
 ```
 
+### Keep Steam from taking the focus
+
+Recommended. Installing or uninstalling a game from the panel hands Steam a
+command, and Steam asks for the focus every time it gets one. Omarchy gives
+it the focus, so Steam's window jumps in front of what you were doing. To
+keep Steam in the background, add this rule to `~/.config/hypr/hyprland.lua`,
+below the line "Add any other personal Hyprland configuration below.":
+
+```lua
+o.window("steam", { focus_on_activate = false })
+```
+
+Hyprland applies it as soon as you save the file. It only affects Steam, and
+you can still switch to Steam yourself.
+
 ## Keyboard shortcuts
 
 Everything in the panel works from the keyboard. Letters are single keys,
@@ -257,9 +272,11 @@ to, or starts Steam with them. No debugging port or anything else is opened.
 ## Known limits
 
 - **Steam comes forward on install and uninstall:** when Steam is running,
-  every command it gets opens its window (even if it was closed to the tray)
-  and takes the focus, so the panel closes. When Steam was closed, it starts
-  without a window.
+  every command it gets opens its window, even if it was closed to the tray,
+  and asks for the focus. While Steam's window is open, the rule in
+  [Keep Steam from taking the focus](#keep-steam-from-taking-the-focus)
+  keeps the focus where it was. The panel closes either way. When Steam was
+  closed, it starts without a window.
 - **Flatpak Steam:** the commands need the native `steam` launcher, so with
   the Flatpak installing and uninstalling still go through Steam's dialogs.
 - **Uninstalling a game while it downloads:** Steam cancels the download,
